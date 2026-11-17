@@ -4,6 +4,7 @@ set -eu
 
 APP_DIR="${APP_DIR:-/opt/supabase}"
 DOMAIN="${DOMAIN:?DOMAIN is required}"
+GATEWAY_PORT="${GATEWAY_PORT:-18000}"
 STUDIO_IMAGE="${STUDIO_IMAGE:-}"
 GHCR_USER="${GHCR_USER:-}"
 
@@ -46,11 +47,13 @@ if [ ! -f .env ]; then
     set_env SUPABASE_PUBLIC_URL "https://$DOMAIN"
     set_env API_EXTERNAL_URL "https://$DOMAIN/auth/v1"
     set_env SITE_URL "https://$DOMAIN"
-    set_env PROXY_DOMAIN "$DOMAIN"
     set_env POOLER_TENANT_ID "$(openssl rand -hex 8)"
-    sh run.sh config add caddy >/dev/null
     log "Secrets written to $APP_DIR/.env (view them with: sh run.sh secrets)"
 fi
+
+set_env API_GW_HTTP_PORT "127.0.0.1:${GATEWAY_PORT}"
+set_env KONG_HTTP_PORT "127.0.0.1:${GATEWAY_PORT}"
+sh run.sh config remove caddy >/dev/null 2>&1 || true
 
 if [ -n "$STUDIO_IMAGE" ]; then
     log "Using Studio image $STUDIO_IMAGE"

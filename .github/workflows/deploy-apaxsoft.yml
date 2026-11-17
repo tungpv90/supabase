@@ -125,12 +125,22 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | ssh deploy-target \
             "cd '$DEPLOY_PATH' && DOMAIN='$DEPLOY_DOMAIN' APP_DIR='$DEPLOY_PATH' STUDIO_IMAGE='$STUDIO_IMAGE' GHCR_USER='$GHCR_USER' sh remote-deploy.sh"
 
-      - name: Smoke test
+      - name: Smoke test gateway
         run: |
           for i in 1 2 3 4 5 6; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "https://$DEPLOY_DOMAIN/auth/v1/health" || true)
+            code=$(ssh deploy-target "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18000/auth/v1/health" || true)
             echo "attempt $i: HTTP $code"
             if [ "$code" = "200" ] || [ "$code" = "401" ]; then exit 0; fi
             sleep 10
           done
           exit 1
+
+      - name: Check public URL
+        continue-on-error: true
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://$DEPLOY_DOMAIN/auth/v1/health" || true)
+          echo "public URL: HTTP $code"
+          if [ "$code" != "200" ] && [ "$code" != "401" ]; then
+            echo "::warning::https://$DEPLOY_DOMAIN is not reachable yet; configure the reverse proxy in aaPanel"
+            exit 1
+          fi
