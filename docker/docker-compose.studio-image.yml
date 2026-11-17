@@ -1,0 +1,4 @@
+services:
+
+  studio:
+    image: ${STUDIO_IMAGE:?STUDIO_IMAGE must be set in .env}

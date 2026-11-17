@@ -1,0 +1,136 @@
+name: Deploy to supabase.apaxsoft.com
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docker/**'
+      - 'deploy/apaxsoft/**'
+      - 'apps/studio/**'
+      - 'packages/**'
+      - 'patches/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/deploy-apaxsoft.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-apaxsoft
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Studio image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - id: meta
+        env:
+          OWNER: ${{ github.repository_owner }}
+          SHA: ${{ github.sha }}
+        run: |
+          owner=$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/$owner/studio:$SHA" >> "$GITHUB_OUTPUT"
+          echo "latest=ghcr.io/$owner/studio:latest" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@885d1462b80bc1c1c7f0b00334ad271f09369c55 # v2.10.0
+
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@1104d471370f9806843c095c1db02b5a90c5f8b6 # v3.3.1
+        with:
+          push: true
+          context: .
+          file: apps/studio/Dockerfile
+          target: production
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ steps.meta.outputs.latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: apaxsoft
+    env:
+      DEPLOY_HOST: 62.84.190.239
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'root' }}
+      DEPLOY_PATH: /opt/supabase
+      DEPLOY_DOMAIN: supabase.apaxsoft.com
+      STUDIO_IMAGE: ${{ needs.build.outputs.image }}
+      GHCR_USER: ${{ github.actor }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            docker
+            deploy
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<CONF
+          Host deploy-target
+            HostName $DEPLOY_HOST
+            User $DEPLOY_USER
+            IdentityFile ~/.ssh/id_deploy
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            ServerAliveInterval 30
+          CONF
+
+      - name: Sync files
+        run: |
+          ssh deploy-target "mkdir -p '$DEPLOY_PATH'"
+          rsync -az \
+            --exclude '.env' \
+            --exclude '.supabase-version' \
+            --exclude 'docker-compose.override.yml' \
+            --exclude 'backups/' \
+            --exclude 'volumes/db/data/' \
+            --exclude 'volumes/storage/' \
+            --exclude 'volumes/snippets/' \
+            docker/ "deploy-target:$DEPLOY_PATH/"
+          scp deploy/apaxsoft/remote-deploy.sh "deploy-target:$DEPLOY_PATH/remote-deploy.sh"
+
+      - name: Deploy
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh deploy-target \
+            "cd '$DEPLOY_PATH' && DOMAIN='$DEPLOY_DOMAIN' APP_DIR='$DEPLOY_PATH' STUDIO_IMAGE='$STUDIO_IMAGE' GHCR_USER='$GHCR_USER' sh remote-deploy.sh"
+
+      - name: Smoke test
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://$DEPLOY_DOMAIN/auth/v1/health" || true)
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ] || [ "$code" = "401" ]; then exit 0; fi
+            sleep 10
+          done
+          exit 1
